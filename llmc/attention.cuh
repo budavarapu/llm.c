@@ -20,13 +20,12 @@ __global__ void permute_kernel(floatX* q, floatX* k, floatX* v,
     if (idx >= B * NH * N * d) { return; }
 
     // Q[b][nh_][n][d_] = inp[b][n][0][nh_][d_]
+
     int b = idx / (NH * N * d);
-    int rest = idx % (NH * N * d);
-    int nh_ = rest / (N * d);
-    rest = rest % (N * d);
-    int n = rest / d;
-    int d_ = rest % d;
-    int inp_idx = (b * N * 3 * NH * d) + (n * 3 * NH * d) + (0 * NH * d) + (nh_ * d) + d_;
+    int nh_ = (idx / (N * d)) % NH;
+    int n = (idx / d) % N;
+    int d_ = idx % d;
+    int inp_idx = (b * N * 3 * NH * d) + (n * 3 * NH * d) + (0 * NH * d) + (nh_ * d) + d_; // Please explain the reason for (0 * NH * d)
     q[idx] = __ldcs(&inp[inp_idx]);
     k[idx] = __ldcs(&inp[inp_idx + NH * d]);
     v[idx] = __ldcs(&inp[inp_idx + 2 * (NH * d)]);
@@ -39,11 +38,9 @@ __global__ void permute_kernel_backward(floatX* dinp,
     if (idx >= B * NH * N * d) { return; }
 
     int b = idx / (NH * N * d);
-    int rest = idx % (NH * N * d);
-    int nh_ = rest / (N * d);
-    rest = rest % (N * d);
-    int n = rest / d;
-    int d_ = rest % d;
+    int nh_ = (idx / (N * d)) % NH;
+    int n = (idx / d) % N;
+    int d_ = idx % d;
 
     int inp_idx = (b * N * 3 * NH * d) + (n * 3 * NH * d) + (0 * NH * d) + (nh_ * d) + d_;
     dinp[inp_idx] = dq[idx];
@@ -59,11 +56,9 @@ __global__ void unpermute_kernel(floatX* inp, floatX *out, int B, int N, int NH,
     if (idx >= B * NH * N * d) { return; }
 
     int b = idx / (NH * N * d);
-    int rest = idx % (NH * N * d);
-    int nh_ = rest / (N * d);
-    rest = rest % (N * d);
-    int n = rest / d;
-    int d_ = rest % d;
+    int nh_ = (idx / (N * d)) % NH;
+    int n = (idx / d) % N;
+    int d_ = idx % d;
     int other_idx = (b * NH * N * d) + (n * NH * d) + (nh_ * d) + d_;
     out[other_idx] = __ldcs(&inp[idx]);
 }
@@ -72,12 +67,12 @@ __global__ void unpermute_kernel_backward(floatX* dinp, const floatX *dout, int 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= B * NH * N * d) { return; }
 
-    int b = idx / (NH * N * d);
-    int rest = idx % (NH * N * d);
-    int nh_ = rest / (N * d);
-    rest = rest % (N * d);
-    int n = rest / d;
-    int d_ = rest % d;
+    int b = idx / (NH * N * d);       
+    idx -= b * (NH * N * d);          
+    int nh_ = idx / (N * d);          
+    idx -= nh_ * (N * d);             
+    int n = idx / d;                  
+    int d_ = idx - n * d;             
     int other_idx = (b * NH * N * d) + (n * NH * d) + (nh_ * d) + d_;
     dinp[idx] = (floatX)dout[other_idx];
 }
@@ -135,10 +130,16 @@ __global__ void softmax_forward_kernel5(floatX* out, float inv_temperature, cons
         sumval += expf(inv_temperature * ((float)x[4*pos_by_4 + lane_id] - maxval));
     }
 
-    float global_maxval = warpReduceMax(maxval);
+    for (int offset = WARP_SIZE/2; offset > 0; offset /= 2) {
+        maxval = fmaxf(maxval, __shfl_down_sync(0xffffffff, maxval, offset));
+        sumval += __shfl_down_sync(0xffffffff, sumval, offset);
+    }
+    __syncwarp();
+
+    float global_maxval = maxval;
     sumval *= expf(inv_temperature * (maxval - global_maxval));
 
-    float sum = warpReduceSum(sumval);
+    float sum = sumval;
     float norm = 1.f / sum;
 
     // divide the whole row by the sum
