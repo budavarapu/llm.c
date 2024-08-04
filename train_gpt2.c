@@ -881,8 +881,12 @@ void gpt2_forward(GPT2 *model, int* inputs, int* targets, size_t B, size_t T) {
         crossentropy_forward(model->acts.losses, model->acts.probs, targets, B, T, Vp);
         // for convenience also evaluate the mean loss
         float mean_loss = 0.0f;
-        for (int i=0; i<B*T; i++) { mean_loss += model->acts.losses[i]; }
-        mean_loss /= B*T;
+        #pragma omp parallel for reduction(+:mean_loss)
+        for (size_t i = 0; i < B * T; i++) {
+            mean_loss += model->acts.losses[i];
+        }
+        mean_loss /= (B * T);
+
         model->mean_loss = mean_loss;
     } else {
         // if we don't have targets, we don't have a loss
